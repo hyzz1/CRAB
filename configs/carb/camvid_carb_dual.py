@@ -1,8 +1,7 @@
 _base_ = [
-    '../_base_/models/carb.py', '../_base_/datasets/camvid_w.py', 
+    '../_base_/models/carb.py', '../_base_/datasets/camvid_w.py',
     '../_base_/default_runtime.py', '../_base_/schedules/schedule_12k_lr_0.005.py'
 ]
-
 suppress_labels = list(range(0, 11))
 model = dict(
     pretrained='open-mmlab://resnet50_v1c',  # add this two line for change backbone from
@@ -12,23 +11,24 @@ model = dict(
         text_categories=11,
         text_embeddings_path='pretrain/camvid_ViT16_clip_text.pth',
         clip_unlabeled_cats=suppress_labels,
-        coeff=1,                        
+        coeff=1,
         warmup_iter=4000,                      # when to start using self-mask
         patch_size=(512, 256),
         resize_rate=2,
         resize_offset=0.5,
-        adaptive=True,                          
+        adaptive=True,
         get_train_mask=False,
         loss_decode=dict(
             type='CrossEntropyLoss', use_masked=True, loss_weight=1.0),
     ),
+    feed_img_to_decode_head=True, # 关键：设置为 True，传递 img 到解码头
 )
 
 
 find_unused_parameters=True
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
-crop_size = (720, 960)
+crop_size = (960, 720)
 train_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(type='LoadAnnotations'),
@@ -63,7 +63,7 @@ test_pipeline = [
         ])
 ]
 data = dict(
-    samples_per_gpu=4,
+    samples_per_gpu=1,
     train=dict(
         img_dir='img/train', # added line
         ann_dir='mask/train', # added line
@@ -72,10 +72,12 @@ data = dict(
     ),
     val=dict(
         img_dir='img/val', # added line
-        ann_dir='mask/val', # added line
+        ann_dir='mask_idx/val', # added line
+        img_labels='metadata/camvid/labels.npy' ,
         pipeline=test_pipeline),
     test=dict(
-        img_dir='img/val', # added line
-        ann_dir='mask/val', # added line
+        img_dir='img/test', # added line
+        ann_dir='mask_idx/test', # added line
+        img_labels='metadata/camvid/labels.npy',
         pipeline=test_pipeline)
 )

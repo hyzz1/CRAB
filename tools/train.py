@@ -18,7 +18,23 @@ from mmseg.apis import init_random_seed, set_random_seed, train_segmentor
 from mmseg.datasets import build_dataset
 from mmseg.models import build_segmentor
 from mmseg.utils import collect_env, get_root_logger
+from mmseg.models import decode_heads
+print("当前加载的 decode_heads 路径：", decode_heads.__file__)
+import os
+import torch
+import warnings
+warnings.filterwarnings('ignore')
 
+# 1. 强制清理GPU缓存（解决统计异常）
+torch.cuda.empty_cache()
+
+# 2. 设置显存分配参数（后续处理碎片）
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:64"  # 比之前更小，更易规避碎片
+
+# 3. 验证GPU状态（可选，方便排查）
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print(f"GPU显存总量: {torch.cuda.get_device_properties(device).total_memory / 1024**3:.2f} GiB")
+print(f"当前空闲显存: {torch.cuda.memory_allocated(device) / 1024**3:.2f} GiB")
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a segmentor')

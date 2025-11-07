@@ -1,5 +1,5 @@
 # model settings
-norm_cfg = dict(type='BN', requires_grad=True)
+norm_cfg = dict(type='BN', requires_grad=True) #单卡使用BN，多卡使用SyncBN
 model = dict(
     type='EncoderDecoder',
     pretrained='open-mmlab://resnet50_v1c',

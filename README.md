@@ -89,7 +89,7 @@ In our paper, we experiment with Cityscapes, CamVid, and WildDash2.
 ## training CARB
 CARB trains segmentation model with single or dual path.
 You need to prepair fixed-masks (pseudo-masks) for single path training.
-
+首先有一些配置文件需要先修改目录，检查camvid_carb_dual.py,config/_base_各个配置文件，具体使用那个在camvid_carb_dual.py已经列出，根据自己情况修改
 **Step 0.** Download and convert the CLIP models, e.g.,
 ```shell
 python tools/maskclip_utils/convert_clip_weights.py --model ViT16
@@ -108,15 +108,19 @@ python tools/maskclip_utils/prompt_engineering.py --model ViT16 --class-set city
 ```shell
 # Please see this file for the detail of execution.
 # You can change detailed configuration by changing config files (e.g., CARB/configs/carb/cityscapes_carb_dual.py)
-bash tools/train.sh 
+Set PYTHONPATH=E:你的项目路径\hyzz1;%PYTHONPATH%
+bash tools/train.sh ('多卡操作')
+python tools/train.py ***/***/camvid_carb_dual.py ('单卡')使用单卡时修改配置文件,单卡使用BN，多卡使用SyncBN
+
 ```
 
 ## Inference CARB
 ```shell
 # Please see this file for the detail of execution.
 bash tools/test.sh
+python tools/test.py E:\CARB\configs\carb\camvid_carb_dual.py E:\CARB\work_dirs\camvid.pth  --eval mIoU --show-dir E:\CARB\work_dirs\camvid_carb_dual\vis
 ```
-
+注：此处test.py执行后给出的图片是单通道掩码，转化为rgb格式，具体操作见problem.md
 ## Acknoledgement
 This is highly borrowed from [MaskCLIP](https://github.com/chongzhou96/MaskCLIP), [mmsegmentation](https://github.com/open-mmlab/mmsegmentation). Thanks to Chong, zhou.
 
