@@ -236,15 +236,21 @@ class CARBHead(BaseDecodeHead):
         Returns:
             Tensor: Refined output of the same shape as input
         """
+        # Suppression value for low-confidence classes  
+        SUPPRESS_VALUE = -100
+        
         # Prompt denoising: filter out classes with low max activation
         if self.pd_thresh > 0:
             N, C, H, W = output.shape
             _output = F.softmax(output * self.temperature, dim=1)
             max_cls_conf = _output.view(N, C, -1).max(dim=-1)[0]
             selected_cls = (max_cls_conf < self.pd_thresh)[:, :, None, None].expand(N, C, H, W)
-            output[selected_cls] = -100  # Suppress low-confidence classes
+            output[selected_cls] = SUPPRESS_VALUE
         
         # Key smoothing: propagate labels from confident to uncertain regions
+        # Note: This operation has O(HW * HW) complexity. For very large images,
+        # memory usage may be significant. Consider reducing input resolution
+        # or using chunked processing for images larger than ~1024x1024.
         if k is not None and self.ks_thresh > 0:
             output = F.softmax(output * self.temperature, dim=1)
             N, C, H, W = output.shape
