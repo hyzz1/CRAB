@@ -19,6 +19,11 @@ model = dict(
         resize_offset=1,                        # minimum resize ratio
         adaptive=True,                          # you can change this to False, then you can use fixed ratio
         get_train_mask=False,
+        # Pseudo-mask quality enhancement parameters
+        temperature=100.0,                      # softmax temperature for sharper predictions
+        ks_thresh=0.1,                          # key smoothing threshold (0 to disable)
+        pd_thresh=0.05,                         # prompt denoising threshold (0 to disable)
+        conf_thresh=0.1,                        # confidence threshold (0 to disable)
         loss_decode=dict(
             type='CrossEntropyLoss', use_masked=True, loss_weight=1.0),
     ),
