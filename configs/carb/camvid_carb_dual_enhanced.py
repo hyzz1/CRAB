@@ -9,17 +9,25 @@ features to potentially improve mIoU:
    - Higher values (e.g., 2.0) make predictions smoother
    - Default: 1.0
 
-2. confidence_threshold: Filters out low-confidence pseudo-mask predictions
+2. adaptive_threshold: Enables adaptive confidence thresholding
+   - When True, uses percentile-based threshold instead of fixed value
+   - More robust across different images and datasets
+   - Default: False
+
+3. threshold_percentile: Percentile for adaptive threshold (0.0-1.0)
+   - Lower values keep more pixels, higher values filter more
+   - Default: 0.3 (filters bottom 30% lowest confidence pixels)
+
+4. confidence_threshold: Fixed confidence threshold (used when adaptive_threshold=False)
    - Pixels with confidence below this threshold are ignored (set to 255)
-   - Recommended range: 0.0-0.5
    - Default: 0.0 (no filtering)
 
-3. multi_scale_mask: Enables multi-scale pseudo-mask generation
+5. multi_scale_mask: Enables multi-scale pseudo-mask generation
    - Generates masks at multiple scales and fuses them
    - Can improve robustness for objects at different scales
    - Default: False
 
-4. mask_scales: Scales used for multi-scale mask generation
+6. mask_scales: Scales used for multi-scale mask generation
    - Default: (0.5, 1.0, 1.5)
 
 Usage:
@@ -49,8 +57,9 @@ model = dict(
         # Enhanced pseudo-mask quality settings:
         # Use lower temperature for sharper predictions
         mask_temperature=0.7,
-        # Filter out predictions with confidence < 0.3
-        confidence_threshold=0.3,
+        # Use adaptive thresholding based on confidence distribution
+        adaptive_threshold=True,
+        threshold_percentile=0.3,  # Filter bottom 30% lowest confidence pixels
         # Enable multi-scale mask fusion for better small object handling
         multi_scale_mask=True,
         mask_scales=(0.75, 1.0, 1.25),

@@ -31,6 +31,7 @@ class CARBHead(BaseDecodeHead):
                     patch_size=(512, 256), resize_rate=1, resize_offset=1, dual_path=True,
                     get_train_mask=False, reset_counter=False,
                     mask_temperature=1.0, confidence_threshold=0.0,
+                    adaptive_threshold=False, threshold_percentile=0.3,
                     multi_scale_mask=False, mask_scales=(0.5, 1.0, 1.5),
                     **kwargs):
         super(CARBHead, self).__init__(
@@ -64,6 +65,8 @@ class CARBHead(BaseDecodeHead):
         # Pseudo-mask quality enhancement parameters
         self.mask_temperature = mask_temperature
         self.confidence_threshold = confidence_threshold
+        self.adaptive_threshold = adaptive_threshold
+        self.threshold_percentile = threshold_percentile
         self.multi_scale_mask = multi_scale_mask
         self.mask_scales = mask_scales
 
@@ -230,20 +233,28 @@ class CARBHead(BaseDecodeHead):
         output = output.permute(0, 2, 3, 1)    
         match_matrix = output[unlabeled_idx]
         
+        # Compute softmax probabilities
+        probs = F.softmax(match_matrix, dim=1)
+        max_probs, argmax_idx = probs.max(dim=1)
+        
+        # Determine threshold (adaptive or fixed)
+        if self.adaptive_threshold and max_probs.numel() > 0:
+            # Adaptive threshold based on percentile of confidence distribution
+            threshold = torch.quantile(max_probs, self.threshold_percentile)
+        else:
+            threshold = self.confidence_threshold
+        
         # Apply confidence thresholding
-        if self.confidence_threshold > 0:
-            # Compute softmax probabilities
-            probs = F.softmax(match_matrix, dim=1)
-            max_probs, argmax_idx = probs.max(dim=1)
+        if threshold > 0:
             # Mask out low-confidence predictions
-            confident_mask = max_probs >= self.confidence_threshold
+            confident_mask = max_probs >= threshold
             clip_semantic_seg[unlabeled_idx] = torch.where(
                 confident_mask,
                 unlabeled_cats[argmax_idx],
                 torch.tensor(self.IGNORE_INDEX, dtype=torch.int64, device=device)
             )
         else:
-            clip_semantic_seg[unlabeled_idx] = unlabeled_cats[match_matrix.argmax(dim=1)]
+            clip_semantic_seg[unlabeled_idx] = unlabeled_cats[argmax_idx]
         
         clip_semantic_seg = clip_semantic_seg[:, None, :, :]
         clip_semantic_seg[clip_semantic_seg<0] = self.IGNORE_INDEX
@@ -313,18 +324,27 @@ class CARBHead(BaseDecodeHead):
         output = accumulated_logits.permute(0, 2, 3, 1)
         match_matrix = output[unlabeled_idx]
         
+        # Compute softmax probabilities
+        probs = F.softmax(match_matrix, dim=1)
+        max_probs, argmax_idx = probs.max(dim=1)
+        
+        # Determine threshold (adaptive or fixed)
+        if self.adaptive_threshold and max_probs.numel() > 0:
+            # Adaptive threshold based on percentile of confidence distribution
+            threshold = torch.quantile(max_probs, self.threshold_percentile)
+        else:
+            threshold = self.confidence_threshold
+        
         # Apply confidence thresholding
-        if self.confidence_threshold > 0:
-            probs = F.softmax(match_matrix, dim=1)
-            max_probs, argmax_idx = probs.max(dim=1)
-            confident_mask = max_probs >= self.confidence_threshold
+        if threshold > 0:
+            confident_mask = max_probs >= threshold
             clip_semantic_seg[unlabeled_idx] = torch.where(
                 confident_mask,
                 unlabeled_cats[argmax_idx],
                 torch.tensor(self.IGNORE_INDEX, dtype=torch.int64, device=device)
             )
         else:
-            clip_semantic_seg[unlabeled_idx] = unlabeled_cats[match_matrix.argmax(dim=1)]
+            clip_semantic_seg[unlabeled_idx] = unlabeled_cats[argmax_idx]
         
         clip_semantic_seg = clip_semantic_seg[:, None, :, :]
         clip_semantic_seg[clip_semantic_seg<0] = self.IGNORE_INDEX

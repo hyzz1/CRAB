@@ -20,10 +20,14 @@ model = dict(
         get_train_mask=False,
         # Pseudo-mask quality enhancement parameters:
         # - mask_temperature: Temperature for softmax (lower = sharper, default=1.0)
-        # - confidence_threshold: Filter low-confidence predictions (default=0.0)
+        # - adaptive_threshold: Use adaptive percentile-based threshold (default=False)
+        # - threshold_percentile: Percentile for adaptive threshold (default=0.3)
+        # - confidence_threshold: Fixed confidence threshold (default=0.0)
         # - multi_scale_mask: Enable multi-scale mask fusion (default=False)
         # - mask_scales: Scales for multi-scale fusion (default=(0.5, 1.0, 1.5))
         mask_temperature=1.0,
+        adaptive_threshold=False,
+        threshold_percentile=0.3,
         confidence_threshold=0.0,
         multi_scale_mask=False,
         mask_scales=(0.5, 1.0, 1.5),

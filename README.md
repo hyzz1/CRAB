@@ -121,18 +121,21 @@ To improve mIoU, you can enhance the quality of pseudo-masks using the following
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `mask_temperature` | 1.0 | Temperature for softmax. Lower values (e.g., 0.5-0.7) produce sharper predictions, higher values smooth them. |
-| `confidence_threshold` | 0.0 | Confidence threshold for filtering. Pixels below this threshold are ignored (set to 255). Range: 0.0-0.5. |
+| `adaptive_threshold` | False | **Recommended.** Use adaptive percentile-based threshold instead of fixed value. Automatically adjusts based on confidence distribution. |
+| `threshold_percentile` | 0.3 | Percentile for adaptive threshold (0.0-1.0). Filters bottom X% lowest confidence pixels. |
+| `confidence_threshold` | 0.0 | Fixed confidence threshold (used when adaptive_threshold=False). Range: 0.0-0.5. |
 | `multi_scale_mask` | False | Enable multi-scale pseudo-mask fusion for better handling of objects at different scales. |
 | `mask_scales` | (0.5, 1.0, 1.5) | Scales to use when multi_scale_mask is enabled. |
 
-**Example enhanced configuration:**
+**Example enhanced configuration with adaptive threshold:**
 ```python
 decode_head=dict(
     # ... other parameters ...
-    mask_temperature=0.7,          # Sharper predictions
-    confidence_threshold=0.3,       # Filter low-confidence pixels
+    mask_temperature=0.7,           # Sharper predictions
+    adaptive_threshold=True,        # Use adaptive thresholding
+    threshold_percentile=0.3,       # Filter bottom 30% lowest confidence pixels
     multi_scale_mask=True,          # Enable multi-scale fusion
-    mask_scales=(0.75, 1.0, 1.25), # Scales for fusion
+    mask_scales=(0.75, 1.0, 1.25),  # Scales for fusion
 )
 ```
 
