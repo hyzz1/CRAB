@@ -1,36 +1,63 @@
+"""
+Enhanced CamVid configuration with improved pseudo-mask quality.
+
+This configuration demonstrates how to use the pseudo-mask quality enhancement
+features to potentially improve mIoU:
+
+1. mask_temperature: Controls the sharpness of softmax distribution
+   - Lower values (e.g., 0.5) make predictions more confident/sharp
+   - Higher values (e.g., 2.0) make predictions smoother
+   - Default: 1.0
+
+2. confidence_threshold: Filters out low-confidence pseudo-mask predictions
+   - Pixels with confidence below this threshold are ignored (set to 255)
+   - Recommended range: 0.0-0.5
+   - Default: 0.0 (no filtering)
+
+3. multi_scale_mask: Enables multi-scale pseudo-mask generation
+   - Generates masks at multiple scales and fuses them
+   - Can improve robustness for objects at different scales
+   - Default: False
+
+4. mask_scales: Scales used for multi-scale mask generation
+   - Default: (0.5, 1.0, 1.5)
+
+Usage:
+    python tools/train.py configs/carb/camvid_carb_dual_enhanced.py
+"""
+
 _base_ = [
     '../_base_/models/carb.py', '../_base_/datasets/camvid_w.py',
     '../_base_/default_runtime.py', '../_base_/schedules/schedule_12k_lr_0.005.py'
 ]
 suppress_labels = list(range(0, 11))
 model = dict(
-    pretrained='open-mmlab://resnet50_v1c',  # add this two line for change backbone from
-    backbone=dict(depth=50),                 # RN50 to RN101
+    pretrained='open-mmlab://resnet50_v1c',
+    backbone=dict(depth=50),
     decode_head=dict(
         num_classes=11,
         text_categories=11,
         text_embeddings_path='pretrain/camvid_ViT16_clip_text.pth',
         clip_unlabeled_cats=suppress_labels,
         coeff=1,
-        warmup_iter=4000,                      # when to start using self-mask
+        warmup_iter=4000,
         patch_size=(512, 256),
         resize_rate=2,
         resize_offset=0.5,
         adaptive=True,
         get_train_mask=False,
-        # Pseudo-mask quality enhancement parameters:
-        # - mask_temperature: Temperature for softmax (lower = sharper, default=1.0)
-        # - confidence_threshold: Filter low-confidence predictions (default=0.0)
-        # - multi_scale_mask: Enable multi-scale mask fusion (default=False)
-        # - mask_scales: Scales for multi-scale fusion (default=(0.5, 1.0, 1.5))
-        mask_temperature=1.0,
-        confidence_threshold=0.0,
-        multi_scale_mask=False,
-        mask_scales=(0.5, 1.0, 1.5),
+        # Enhanced pseudo-mask quality settings:
+        # Use lower temperature for sharper predictions
+        mask_temperature=0.7,
+        # Filter out predictions with confidence < 0.3
+        confidence_threshold=0.3,
+        # Enable multi-scale mask fusion for better small object handling
+        multi_scale_mask=True,
+        mask_scales=(0.75, 1.0, 1.25),
         loss_decode=dict(
             type='CrossEntropyLoss', use_masked=True, loss_weight=1.0),
     ),
-    feed_img_to_decode_head=True, # 关键：设置为 True，传递 img 到解码头
+    feed_img_to_decode_head=True,
 )
 
 
@@ -58,7 +85,6 @@ test_pipeline = [
     dict(
         type='MultiScaleFlipAug',
         img_scale=(960, 720),
-        # img_ratios=[0.5, 0.75, 1.0, 1.25, 1.5, 1.75],
         flip=False,
         transforms=[
             dict(type='Resize', keep_ratio=True),
@@ -74,19 +100,19 @@ test_pipeline = [
 data = dict(
     samples_per_gpu=1,
     train=dict(
-        img_dir='img/train', # added line
-        ann_dir='mask/train', # added line
+        img_dir='img/train',
+        ann_dir='mask/train',
         img_labels='metadata/camvid/labels.npy',
         pipeline=train_pipeline
     ),
     val=dict(
-        img_dir='img/val', # added line
-        ann_dir='mask_idx/val', # added line
-        img_labels='metadata/camvid/labels.npy' ,
+        img_dir='img/val',
+        ann_dir='mask_idx/val',
+        img_labels='metadata/camvid/labels.npy',
         pipeline=test_pipeline),
     test=dict(
-        img_dir='img/test', # added line
-        ann_dir='mask_idx/test', # added line
+        img_dir='img/test',
+        ann_dir='mask_idx/test',
         img_labels='metadata/camvid/labels.npy',
         pipeline=test_pipeline)
 )
