@@ -22,7 +22,8 @@ class CARBHead(BaseDecodeHead):
                     clip_unlabeled_cats=[], clip_cfg=None, clip_weights_path=None, clip_channels=None,
                     vit=False, adaptive=False, queue_size=5 ,coeff=1, warmup_iter=8000,
                     patch_size=(512, 256), resize_rate=1, resize_offset=1, dual_path=True,
-                    get_train_mask=False, reset_counter=False, **kwargs):
+                    get_train_mask=False, reset_counter=False,
+                    temperature=100.0, ks_thresh=0., pd_thresh=0., conf_thresh=0., **kwargs):
         super(CARBHead, self).__init__(
             input_transform=decode_module_cfg.pop('input_transform'), **kwargs)
         self.text_categories = text_categories
@@ -50,6 +51,12 @@ class CARBHead(BaseDecodeHead):
         self.resize_offset = resize_offset
         self.dual_path = dual_path
         self.get_train_mask = get_train_mask
+        
+        # Pseudo-mask quality enhancement parameters
+        self.temperature = temperature
+        self.ks_thresh = ks_thresh
+        self.pd_thresh = pd_thresh
+        self.conf_thresh = conf_thresh
 
         del self.conv_seg
         self.init_cfg = None
@@ -139,24 +146,40 @@ class CARBHead(BaseDecodeHead):
 
     #伪掩码生成机制
     def gen_clip_mask(self, img, shape, img_label, unlabeled_cats=None):
-         
+        """Generate pseudo masks using CLIP features with enhanced quality.
+        
+        This method extracts CLIP visual features, computes similarity with text 
+        embeddings, and applies refinement techniques to improve pseudo-mask quality:
+        - Temperature scaling for sharper predictions
+        - Key smoothing for spatial consistency
+        - Prompt denoising to filter low-confidence class predictions
+        - Confidence thresholding to mark uncertain regions
+        
+        Args:
+            img (Tensor): Input images of shape [N, C, H, W]
+            shape (tuple): Target output shape (H, W)
+            img_label (Tensor): Image-level labels for each class
+            unlabeled_cats (Tensor): Indices of unlabeled categories
+            
+        Returns:
+            Tensor: Pseudo semantic segmentation masks of shape [N, 1, H, W]
+        """
         x = self.clip(img)[-1]
         
         q, k, v, cls_token = None, None, None, None
         if isinstance(x, list) and len(x) == 4:
             x, q, k, v = x      # assign vit output to each variable
-        if isinstance(x, list) and len(x) == 2: # len(x) == 4
+        if isinstance(x, list) and len(x) == 2:
             x, cls_token = x    # assign x and cls_token 
         if v is not None:
             feat = self.proj(v) # if vit, project v to make feature
-            # print(feat.shape) [4, 512, 32, 64]
         else:
             feat = self.proj(x) 
         if cls_token is not None:
             cls_token = self.proj(cls_token[:, :, None, None])[:, :, 0, 0]
         
-        feat = feat / feat.norm(dim=1, keepdim=True) # normalize is true
-        clip_semantic_seg = torch.zeros(img.shape[0], shape[0], shape[1], dtype=torch.int64).cuda() # [4, 512, 1024]
+        feat = feat / feat.norm(dim=1, keepdim=True) # normalize feature
+        clip_semantic_seg = torch.zeros(img.shape[0], shape[0], shape[1], dtype=torch.int64).cuda()
 
         text_embeddings = self.text_embeddings
         unlabeled_text = text_embeddings[unlabeled_cats]
@@ -164,6 +187,9 @@ class CARBHead(BaseDecodeHead):
 
         output = torch.einsum('nchw,lc->nlhw', [feat, unlabeled_text])
         output = output * img_label.unsqueeze(-1).unsqueeze(-1)
+        
+        # Apply refinement techniques to improve pseudo-mask quality
+        output = self.refine_clip_output(output, k)
 
         output = resize(
             input=output,
@@ -171,14 +197,79 @@ class CARBHead(BaseDecodeHead):
             mode='bilinear',
             align_corners=self.align_corners)
         
+        # Apply confidence thresholding to filter uncertain predictions
+        neg_pos = None
+        if self.conf_thresh > 0:
+            N, C, H, W = output.shape
+            # Find positions where max confidence is below threshold
+            neg_pos = output.view(N, C, -1).max(dim=1)[0] < self.conf_thresh
+            neg_pos = neg_pos.view(N, H, W)
+        
         output = output.permute(0, 2, 3, 1)    
         match_matrix = output[unlabeled_idx]
         
         clip_semantic_seg[unlabeled_idx] = unlabeled_cats[match_matrix.argmax(dim=1)]
+        
+        # Mark low-confidence regions as ignore (255)
+        if neg_pos is not None:
+            clip_semantic_seg[neg_pos] = 255
+            
         clip_semantic_seg = clip_semantic_seg[:, None, :, :]
         clip_semantic_seg[clip_semantic_seg<0] = 255
 
-        return clip_semantic_seg 
+        return clip_semantic_seg
+    
+    def refine_clip_output(self, output, k=None):
+        """Refine CLIP output using prompt denoising and key smoothing.
+        
+        This method applies two refinement techniques:
+        1. Prompt Denoising (pd_thresh): Suppresses classes with low maximum 
+           activation across the image, reducing noise from irrelevant classes.
+        2. Key Smoothing (ks_thresh): Uses key features from ViT attention to 
+           smooth predictions in uncertain regions by propagating labels from 
+           confident neighbors based on feature similarity.
+        
+        Args:
+            output (Tensor): Raw similarity scores of shape [N, C, H, W]
+            k (Tensor, optional): Key features from ViT attention [N, HW, D]
+            
+        Returns:
+            Tensor: Refined output of the same shape as input
+        """
+        # Suppression value for low-confidence classes  
+        SUPPRESS_VALUE = -100
+        
+        # Prompt denoising: filter out classes with low max activation
+        if self.pd_thresh > 0:
+            N, C, H, W = output.shape
+            _output = F.softmax(output * self.temperature, dim=1)
+            max_cls_conf = _output.view(N, C, -1).max(dim=-1)[0]
+            selected_cls = (max_cls_conf < self.pd_thresh)[:, :, None, None].expand(N, C, H, W)
+            output[selected_cls] = SUPPRESS_VALUE
+        
+        # Key smoothing: propagate labels from confident to uncertain regions
+        # Note: This operation has O(HW * HW) complexity. For very large images,
+        # memory usage may be significant. Consider reducing input resolution
+        # or using chunked processing for images larger than ~1024x1024.
+        if k is not None and self.ks_thresh > 0:
+            output = F.softmax(output * self.temperature, dim=1)
+            N, C, H, W = output.shape
+            output = output.view(N, C, -1).transpose(-2, -1)  # [N, HW, C]
+            
+            # Compute similarity weights using normalized key features
+            k = F.normalize(k, p=2)
+            weight = k @ k.transpose(-2, -1)  # [N, HW, HW]
+            
+            # Find positions with low confidence (uncertain predictions)
+            selected_pos = (output.max(dim=-1, keepdim=True)[0] < self.ks_thresh)
+            selected_pos = selected_pos.expand(-1, -1, C)
+            
+            # Smooth uncertain positions using weighted average from neighbors
+            weighted_output = weight @ output
+            output[selected_pos] = weighted_output[selected_pos]
+            output = output.transpose(-2, -1).view(N, C, H, W)
+        
+        return output 
 
     def label_sanity_check(self, gt_semantic_seg):
         for i in self.clip_unlabeled_cats: # if label is not within 0~19, gt_semantic_seg will be True --> alarm
