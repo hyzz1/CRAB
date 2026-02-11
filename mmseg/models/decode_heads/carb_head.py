@@ -17,12 +17,23 @@ from ..losses import accuracy
 
 @HEADS.register_module()
 class CARBHead(BaseDecodeHead):
+    """CARB Head for weakly supervised semantic segmentation.
+    
+    Attributes:
+        IGNORE_INDEX: The label index to be ignored (255 by convention).
+    """
+    
+    IGNORE_INDEX = 255
 
     def __init__(self, decode_module_cfg, text_categories, text_channels, text_embeddings_path,
                     clip_unlabeled_cats=[], clip_cfg=None, clip_weights_path=None, clip_channels=None,
                     vit=False, adaptive=False, queue_size=5 ,coeff=1, warmup_iter=8000,
                     patch_size=(512, 256), resize_rate=1, resize_offset=1, dual_path=True,
-                    get_train_mask=False, reset_counter=False, **kwargs):
+                    get_train_mask=False, reset_counter=False,
+                    mask_temperature=1.0, confidence_threshold=0.0,
+                    adaptive_threshold=False, threshold_percentile=0.3,
+                    multi_scale_mask=False, mask_scales=(0.5, 1.0, 1.5),
+                    **kwargs):
         super(CARBHead, self).__init__(
             input_transform=decode_module_cfg.pop('input_transform'), **kwargs)
         self.text_categories = text_categories
@@ -50,6 +61,14 @@ class CARBHead(BaseDecodeHead):
         self.resize_offset = resize_offset
         self.dual_path = dual_path
         self.get_train_mask = get_train_mask
+
+        # Pseudo-mask quality enhancement parameters
+        self.mask_temperature = mask_temperature
+        self.confidence_threshold = confidence_threshold
+        self.adaptive_threshold = adaptive_threshold
+        self.threshold_percentile = threshold_percentile
+        self.multi_scale_mask = multi_scale_mask
+        self.mask_scales = mask_scales
 
         del self.conv_seg
         self.init_cfg = None
@@ -139,24 +158,60 @@ class CARBHead(BaseDecodeHead):
 
     #伪掩码生成机制
     def gen_clip_mask(self, img, shape, img_label, unlabeled_cats=None):
-         
+        """Generate pseudo-masks using CLIP features.
+        
+        This method supports quality enhancement through:
+        - Temperature scaling: Controls the sharpness of the softmax distribution
+        - Confidence thresholding: Filters out low-confidence predictions
+        - Multi-scale fusion: Generates masks at multiple scales and combines them
+        
+        Args:
+            img: Input image tensor
+            shape: Target output shape (H, W)
+            img_label: Image-level labels indicating which classes are present
+            unlabeled_cats: Categories to generate pseudo-masks for
+            
+        Returns:
+            clip_semantic_seg: Pseudo-mask tensor with shape [N, 1, H, W]
+        """
+        if self.multi_scale_mask:
+            return self._gen_multi_scale_mask(img, shape, img_label, unlabeled_cats)
+        else:
+            return self._gen_single_scale_mask(img, shape, img_label, unlabeled_cats)
+    
+    def _extract_clip_features(self, img):
+        """Extract CLIP features from an image.
+        
+        Args:
+            img: Input image tensor
+            
+        Returns:
+            feat: Normalized feature tensor
+        """
         x = self.clip(img)[-1]
         
         q, k, v, cls_token = None, None, None, None
         if isinstance(x, list) and len(x) == 4:
-            x, q, k, v = x      # assign vit output to each variable
-        if isinstance(x, list) and len(x) == 2: # len(x) == 4
-            x, cls_token = x    # assign x and cls_token 
+            x, q, k, v = x
+        if isinstance(x, list) and len(x) == 2:
+            x, cls_token = x
         if v is not None:
-            feat = self.proj(v) # if vit, project v to make feature
-            # print(feat.shape) [4, 512, 32, 64]
+            feat = self.proj(v)
         else:
-            feat = self.proj(x) 
+            feat = self.proj(x)
         if cls_token is not None:
             cls_token = self.proj(cls_token[:, :, None, None])[:, :, 0, 0]
         
-        feat = feat / feat.norm(dim=1, keepdim=True) # normalize is true
-        clip_semantic_seg = torch.zeros(img.shape[0], shape[0], shape[1], dtype=torch.int64).cuda() # [4, 512, 1024]
+        feat = feat / feat.norm(dim=1, keepdim=True)
+        return feat
+
+    def _gen_single_scale_mask(self, img, shape, img_label, unlabeled_cats=None):
+        """Generate pseudo-mask at a single scale."""
+        feat = self._extract_clip_features(img)
+        device = img.device
+        
+        clip_semantic_seg = torch.zeros(img.shape[0], shape[0], shape[1], 
+                                        dtype=torch.int64, device=device)
 
         text_embeddings = self.text_embeddings
         unlabeled_text = text_embeddings[unlabeled_cats]
@@ -171,14 +226,130 @@ class CARBHead(BaseDecodeHead):
             mode='bilinear',
             align_corners=self.align_corners)
         
+        # Apply temperature scaling for softmax sharpening/smoothing
+        if self.mask_temperature != 1.0:
+            output = output / self.mask_temperature
+        
         output = output.permute(0, 2, 3, 1)    
         match_matrix = output[unlabeled_idx]
         
-        clip_semantic_seg[unlabeled_idx] = unlabeled_cats[match_matrix.argmax(dim=1)]
+        # Compute softmax probabilities
+        probs = F.softmax(match_matrix, dim=1)
+        max_probs, argmax_idx = probs.max(dim=1)
+        
+        # Determine threshold (adaptive or fixed)
+        if self.adaptive_threshold and max_probs.numel() > 0:
+            # Adaptive threshold based on percentile of confidence distribution
+            threshold = torch.quantile(max_probs, self.threshold_percentile)
+        else:
+            threshold = self.confidence_threshold
+        
+        # Apply confidence thresholding
+        if threshold > 0:
+            # Mask out low-confidence predictions
+            confident_mask = max_probs >= threshold
+            clip_semantic_seg[unlabeled_idx] = torch.where(
+                confident_mask,
+                unlabeled_cats[argmax_idx],
+                torch.tensor(self.IGNORE_INDEX, dtype=torch.int64, device=device)
+            )
+        else:
+            clip_semantic_seg[unlabeled_idx] = unlabeled_cats[argmax_idx]
+        
         clip_semantic_seg = clip_semantic_seg[:, None, :, :]
-        clip_semantic_seg[clip_semantic_seg<0] = 255
+        clip_semantic_seg[clip_semantic_seg<0] = self.IGNORE_INDEX
 
-        return clip_semantic_seg 
+        return clip_semantic_seg
+    
+    def _gen_multi_scale_mask(self, img, shape, img_label, unlabeled_cats=None):
+        """Generate pseudo-masks at multiple scales and fuse them.
+        
+        This method generates masks at different image scales and combines
+        them through voting to improve robustness and accuracy.
+        """
+        batch_size = img.shape[0]
+        device = img.device
+        original_size = img.shape[2:]
+        
+        text_embeddings = self.text_embeddings
+        unlabeled_text = text_embeddings[unlabeled_cats]
+        
+        # Accumulate logits from multiple scales
+        accumulated_logits = None
+        
+        for scale in self.mask_scales:
+            # Resize image to current scale
+            if scale != 1.0:
+                scaled_size = (int(original_size[0] * scale), int(original_size[1] * scale))
+                scaled_img = resize(
+                    input=img,
+                    size=scaled_size,
+                    mode='bilinear',
+                    align_corners=self.align_corners
+                )
+            else:
+                scaled_img = img
+            
+            # Generate features at this scale using helper method
+            feat = self._extract_clip_features(scaled_img)
+            
+            output = torch.einsum('nchw,lc->nlhw', [feat, unlabeled_text])
+            output = output * img_label.unsqueeze(-1).unsqueeze(-1)
+            
+            # Resize output to target shape
+            output = resize(
+                input=output,
+                size=shape,
+                mode='bilinear',
+                align_corners=self.align_corners
+            )
+            
+            # Apply temperature scaling
+            if self.mask_temperature != 1.0:
+                output = output / self.mask_temperature
+            
+            # Accumulate logits
+            if accumulated_logits is None:
+                accumulated_logits = output
+            else:
+                accumulated_logits = accumulated_logits + output
+        
+        # Average the accumulated logits
+        accumulated_logits = accumulated_logits / len(self.mask_scales)
+        
+        clip_semantic_seg = torch.zeros(batch_size, shape[0], shape[1], 
+                                        dtype=torch.int64, device=device)
+        unlabeled_idx = (clip_semantic_seg == 0)
+        
+        output = accumulated_logits.permute(0, 2, 3, 1)
+        match_matrix = output[unlabeled_idx]
+        
+        # Compute softmax probabilities
+        probs = F.softmax(match_matrix, dim=1)
+        max_probs, argmax_idx = probs.max(dim=1)
+        
+        # Determine threshold (adaptive or fixed)
+        if self.adaptive_threshold and max_probs.numel() > 0:
+            # Adaptive threshold based on percentile of confidence distribution
+            threshold = torch.quantile(max_probs, self.threshold_percentile)
+        else:
+            threshold = self.confidence_threshold
+        
+        # Apply confidence thresholding
+        if threshold > 0:
+            confident_mask = max_probs >= threshold
+            clip_semantic_seg[unlabeled_idx] = torch.where(
+                confident_mask,
+                unlabeled_cats[argmax_idx],
+                torch.tensor(self.IGNORE_INDEX, dtype=torch.int64, device=device)
+            )
+        else:
+            clip_semantic_seg[unlabeled_idx] = unlabeled_cats[argmax_idx]
+        
+        clip_semantic_seg = clip_semantic_seg[:, None, :, :]
+        clip_semantic_seg[clip_semantic_seg<0] = self.IGNORE_INDEX
+        
+        return clip_semantic_seg
 
     def label_sanity_check(self, gt_semantic_seg):
         for i in self.clip_unlabeled_cats: # if label is not within 0~19, gt_semantic_seg will be True --> alarm
